@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -48,11 +49,22 @@ def discord_request(token, method, path, payload=None, query=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
     request = Request(url, data=body, headers=headers, method=method)
-    with urlopen(request, timeout=25) as response:
-        raw = response.read()
-        if not raw:
+    try:
+        with urlopen(request, timeout=25) as response:
+            raw = response.read()
+            if not raw:
+                return None
+            return json.loads(raw.decode("utf-8"))
+    except HTTPError as error:
+        if error.code == 429:
+            retry_after = error.headers.get("Retry-After", "unknown")
+            print(
+                f"Discord rate limited this request (HTTP 429); "
+                f"skipping Discord work for this run (retry-after={retry_after})",
+                file=sys.stderr,
+            )
             return None
-        return json.loads(raw.decode("utf-8"))
+        raise
 
 
 def message_id(value):
