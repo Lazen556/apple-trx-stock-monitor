@@ -28,16 +28,18 @@ jobs:
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
         run: python bot_poll.py
 
-      - name: Check selected stock and notify Discord
+      - name: Check selected stock and send notifications
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
+          REPORT_INTERVAL_MINUTES: "30"
         run: python monitor_once.py
 
       - name: Save stock state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add stock_state.json alert_state.json product_catalog.json current_status.json watchlist.json discord_state.json
+          git add stock_state.json alert_state.json product_catalog.json current_status.json report_state.json watchlist.json discord_state.json
           if git diff --cached --quiet; then
             echo "No state change"
             exit 0

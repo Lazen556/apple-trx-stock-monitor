@@ -2,9 +2,11 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parent
@@ -14,6 +16,7 @@ WATCHLIST_PATH = ROOT / "watchlist.json"
 ALERT_STATE_PATH = ROOT / "alert_state.json"
 CATALOG_PATH = ROOT / "product_catalog.json"
 STATUS_PATH = ROOT / "current_status.json"
+REPORT_STATE_PATH = ROOT / "report_state.json"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleTRXStockMonitor/1.0"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -87,6 +90,84 @@ def send_discord(webhook_url, message):
             raise RuntimeError(f"Discord returned HTTP {response.status}")
 
 
+def send_wecom(webhook_url, message):
+    body = json.dumps(
+        {"msgtype": "markdown", "markdown": {"content": message}},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = Request(
+        webhook_url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=20) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    if int(result.get("errcode", -1)) != 0:
+        raise RuntimeError(f"WeCom returned: {result}")
+
+
+def send_notification(discord_url, wecom_url, message):
+    sent_to = []
+    if discord_url:
+        send_discord(discord_url, message)
+        sent_to.append("Discord")
+    if wecom_url:
+        send_wecom(wecom_url, message)
+        sent_to.append("WeCom")
+    if not sent_to:
+        raise RuntimeError(
+            "Missing notification webhook. Configure DISCORD_WEBHOOK_URL or WECOM_WEBHOOK_URL."
+        )
+    print(f"Notification sent to {', '.join(sent_to)}")
+
+
+def build_selected_report(selected_skus, cycle_results, store_name):
+    checked_count = sum(1 for sku in selected_skus if sku in cycle_results)
+    available_count = sum(
+        1 for sku in selected_skus if cycle_results.get(sku, {}).get("available")
+    )
+    failed_count = len(selected_skus) - checked_count
+    if checked_count == 0:
+        first_line = f"❓ 查询失败｜0/{len(selected_skus)} 个已选型号取得结果"
+    elif available_count:
+        first_line = f"🟢 有货｜{available_count}/{len(selected_skus)} 个已选型号"
+    else:
+        first_line = f"⚪ 无货｜0/{len(selected_skus)} 个已选型号"
+    if failed_count and checked_count:
+        first_line += f"｜{failed_count} 个查询失败"
+
+    checked_at = datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).strftime(
+        "%Y-%m-%d %H:%M MYT"
+    )
+    lines = [
+        first_line,
+        f"Apple Malaysia · {store_name}",
+        f"更新时间：{checked_at}",
+        "",
+        "详细信息：",
+    ]
+    for index, sku in enumerate(selected_skus, start=1):
+        item = cycle_results.get(sku)
+        if item is None:
+            lines.append(f"{index}. ❓ 查询失败｜{sku}")
+            continue
+        marker = "🟢 有货" if item["available"] else "⚪ 无货"
+        quote_text = item.get("quote") or "Apple 未提供提货说明"
+        lines.append(f"{index}. {marker}｜{item['title']}")
+        lines.append(f"   SKU：{sku}｜提货：{quote_text}")
+    lines.extend(
+        [
+            "",
+            "购买页面：https://www.apple.com/my/shop/buy-iphone/iphone-18-pro",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def main():
     config = load_json(CONFIG_PATH, {})
     state = load_json(STATE_PATH, {})
@@ -94,7 +175,14 @@ def main():
     alert_state = load_json(ALERT_STATE_PATH, {})
     catalog = load_json(CATALOG_PATH, {})
     current_status = load_json(STATUS_PATH, {})
-    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    report_state = load_json(
+        REPORT_STATE_PATH, {"last_report_at": 0, "watchlist_signature": ""}
+    )
+    discord_webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    wecom_webhook_url = os.environ.get("WECOM_WEBHOOK_URL", "").strip()
+    report_interval_minutes = max(
+        1, int(os.environ.get("REPORT_INTERVAL_MINUTES", "30"))
+    )
 
     country = config.get("country", "MY")
     location = config["location"]
@@ -108,6 +196,7 @@ def main():
     next_alert_state = dict(alert_state)
     next_catalog = dict(catalog)
     next_status = dict(current_status)
+    cycle_results = {}
     errors = 0
     newly_available = []
 
@@ -131,6 +220,7 @@ def main():
                 "available": available,
                 "quote": result["quote"],
             }
+            cycle_results[sku] = result
             status = "AVAILABLE" if available else "unavailable"
             print(
                 f"[{index}/{len(devices)}] {result['title']} ({sku}) -> {status}; {result['quote']}"
@@ -146,21 +236,53 @@ def main():
         if index < len(devices):
             time.sleep(1.5)
 
-    if newly_available:
-        if not webhook_url:
-            raise RuntimeError(
-                "Missing DISCORD_WEBHOOK_URL. Add it under GitHub Settings > Secrets and variables > Actions."
-            )
+    selected_skus = [sku for sku in devices if sku in watchlist]
+    watchlist_signature = ",".join(selected_skus)
+    now = int(time.time())
+    last_report_at = int(report_state.get("last_report_at", 0) or 0)
+    report_due = bool(selected_skus) and (
+        watchlist_signature != str(report_state.get("watchlist_signature", ""))
+        or now - last_report_at >= report_interval_minutes * 60
+    )
+
+    if report_due:
+        message = build_selected_report(selected_skus, cycle_results, store_name)
+        send_notification(discord_webhook_url, wecom_webhook_url, message)
+        report_state = {
+            "last_report_at": now,
+            "watchlist_signature": watchlist_signature,
+        }
+        print(
+            f"Periodic selected-model report sent for {len(selected_skus)} item(s); "
+            f"interval={report_interval_minutes}m"
+        )
+    elif newly_available:
         lines = [
-            "🚨 Apple Malaysia The Exchange TRX 有货",
-            "https://www.apple.com/my/shop/buy-iphone/iphone-18-pro",
+            f"🟢 有货｜{len(newly_available)} 个已选型号刚刚到货",
+            f"Apple Malaysia · {store_name}",
+            "",
+            "详细信息：",
         ]
-        for item in newly_available:
-            lines.append(f"• {item['title']} ({item['sku']})")
-        send_discord(webhook_url, "\n".join(lines))
-        print(f"Discord notification sent for {len(newly_available)} item(s)")
+        for index, item in enumerate(newly_available, start=1):
+            lines.append(f"{index}. 🟢 有货｜{item['title']}")
+            lines.append(
+                f"   SKU：{item['sku']}｜提货：{item.get('quote') or 'Apple 未提供提货说明'}"
+            )
+        lines.extend(
+            [
+                "",
+                "购买页面：https://www.apple.com/my/shop/buy-iphone/iphone-18-pro",
+            ]
+        )
+        send_notification(
+            discord_webhook_url, wecom_webhook_url, "\n".join(lines)
+        )
+        print(f"Immediate availability alert sent for {len(newly_available)} item(s)")
     else:
-        print("No new availability transition")
+        print("No notification due this run")
+
+    if not selected_skus:
+        report_state = {"last_report_at": 0, "watchlist_signature": ""}
 
     with STATE_PATH.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(next_state, handle, ensure_ascii=False, indent=2)
@@ -176,6 +298,10 @@ def main():
 
     with STATUS_PATH.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(next_status, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+    with REPORT_STATE_PATH.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(report_state, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
     if errors == len(devices):
