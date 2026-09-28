@@ -3,7 +3,8 @@ name: Apple TRX stock monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    # Every 5 minutes, offset from the top of the hour to reduce GitHub queue delays.
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
 
 permissions:
   contents: write
