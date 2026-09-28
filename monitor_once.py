@@ -10,6 +10,9 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "stock_state.json"
+WATCHLIST_PATH = ROOT / "watchlist.json"
+ALERT_STATE_PATH = ROOT / "alert_state.json"
+CATALOG_PATH = ROOT / "product_catalog.json"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleTRXStockMonitor/1.0"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -86,11 +89,10 @@ def send_discord(webhook_url, message):
 def main():
     config = load_json(CONFIG_PATH, {})
     state = load_json(STATE_PATH, {})
+    watchlist = set(load_json(WATCHLIST_PATH, []))
+    alert_state = load_json(ALERT_STATE_PATH, {})
+    catalog = load_json(CATALOG_PATH, {})
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-    if not webhook_url:
-        raise RuntimeError(
-            "Missing DISCORD_WEBHOOK_URL. Add it under GitHub Settings > Secrets and variables > Actions."
-        )
 
     country = config.get("country", "MY")
     location = config["location"]
@@ -101,6 +103,8 @@ def main():
         raise RuntimeError("config.json has no devices")
 
     next_state = dict(state)
+    next_alert_state = dict(alert_state)
+    next_catalog = dict(catalog)
     errors = 0
     newly_available = []
 
@@ -117,14 +121,17 @@ def main():
                 raise RuntimeError(f"store {store_number}/{store_name} not found")
             result = get_product_status(store, sku)
             available = result["available"]
-            previous = bool(state.get(key, False))
             next_state[key] = available
+            next_catalog[sku] = result["title"]
             status = "AVAILABLE" if available else "unavailable"
             print(
                 f"[{index}/{len(devices)}] {result['title']} ({sku}) -> {status}; {result['quote']}"
             )
-            if available and not previous:
+            if not available or sku not in watchlist:
+                next_alert_state[key] = False
+            elif not bool(alert_state.get(key, False)):
                 newly_available.append(result)
+                next_alert_state[key] = True
         except Exception as error:
             errors += 1
             print(f"[{index}/{len(devices)}] {sku} -> ERROR: {error}")
@@ -132,6 +139,10 @@ def main():
             time.sleep(1.5)
 
     if newly_available:
+        if not webhook_url:
+            raise RuntimeError(
+                "Missing DISCORD_WEBHOOK_URL. Add it under GitHub Settings > Secrets and variables > Actions."
+            )
         lines = [
             "🚨 Apple Malaysia The Exchange TRX 有货",
             "https://www.apple.com/my/shop/buy-iphone/iphone-18-pro",
@@ -145,6 +156,14 @@ def main():
 
     with STATE_PATH.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(next_state, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+    with ALERT_STATE_PATH.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(next_alert_state, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+    with CATALOG_PATH.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(next_catalog, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
     if errors == len(devices):
