@@ -11,6 +11,7 @@ CONFIG_PATH = ROOT / "config.json"
 WATCHLIST_PATH = ROOT / "watchlist.json"
 STATE_PATH = ROOT / "discord_state.json"
 CATALOG_PATH = ROOT / "product_catalog.json"
+STATUS_PATH = ROOT / "current_status.json"
 API_ROOT = "https://discord.com/api/v10"
 USER_AGENT = "AppleTRXStockMonitor/1.0"
 
@@ -124,6 +125,7 @@ def help_messages():
     return [
         "**Apple TRX 监测指令**",
         "`!list` 查看全部型号和当前选择",
+        "`!status` 查看全部型号当前库存（不提醒）",
         "`!watch 1 3` 选择第 1、3 个型号",
         "`!mute 1 3` 静音第 1、3 个型号",
         "`!selected` 查看正在监测的型号",
@@ -145,6 +147,7 @@ def main():
     watched.intersection_update(devices)
     state = load_json(STATE_PATH, {"last_message_id": ""})
     catalog = load_json(CATALOG_PATH, {})
+    statuses = load_json(STATUS_PATH, {})
     last_id = str(state.get("last_message_id", ""))
     query = {"limit": "100"}
     if last_id:
@@ -186,6 +189,18 @@ def main():
         elif command == "!list":
             for response in render_list(devices, watched, catalog):
                 send_message(token, channel_id, response)
+        elif command == "!status":
+            if not statuses:
+                send_message(token, channel_id, "还没有库存检查记录，请等待下一次 Actions 运行。")
+            else:
+                status_lines = ["**Apple TRX 全量库存（仅查询，不提醒）**"]
+                for index, sku in enumerate(devices, start=1):
+                    item = statuses.get(sku, {})
+                    marker = "🟢 有货" if item.get("available") else "⚪ 无货"
+                    title = item.get("title", product_label(sku, catalog))
+                    status_lines.append(f"{index}. {marker} {title} — `{sku}`")
+                for response in split_messages(status_lines):
+                    send_message(token, channel_id, response)
         elif command == "!selected":
             selected = [
                 f"{index}. {product_label(sku, catalog)} — `{sku}`"

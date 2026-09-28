@@ -17,6 +17,7 @@
 ```text
 !help
 !list
+!status
 !watch 1 3
 !mute 1 3
 !selected
@@ -24,6 +25,8 @@
 ```
 
 `!list` 会显示编号、型号和 SKU。`!watch 1 3` 表示选择第 1 和第 3 个型号；`!clear` 会清空选择，让全部型号免打扰。
+
+`!status` 会查询全部型号的最新库存状态，但不会触发提醒，也不会 @ 任何人。
 
 由于检查器运行在 GitHub Actions，Discord 指令会在下一次任务运行时处理，通常最多等待约 5 分钟，不是实时对话机器人。
 

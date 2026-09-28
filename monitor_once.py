@@ -13,6 +13,7 @@ STATE_PATH = ROOT / "stock_state.json"
 WATCHLIST_PATH = ROOT / "watchlist.json"
 ALERT_STATE_PATH = ROOT / "alert_state.json"
 CATALOG_PATH = ROOT / "product_catalog.json"
+STATUS_PATH = ROOT / "current_status.json"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleTRXStockMonitor/1.0"
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -92,6 +93,7 @@ def main():
     watchlist = set(load_json(WATCHLIST_PATH, []))
     alert_state = load_json(ALERT_STATE_PATH, {})
     catalog = load_json(CATALOG_PATH, {})
+    current_status = load_json(STATUS_PATH, {})
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 
     country = config.get("country", "MY")
@@ -105,6 +107,7 @@ def main():
     next_state = dict(state)
     next_alert_state = dict(alert_state)
     next_catalog = dict(catalog)
+    next_status = dict(current_status)
     errors = 0
     newly_available = []
 
@@ -123,6 +126,11 @@ def main():
             available = result["available"]
             next_state[key] = available
             next_catalog[sku] = result["title"]
+            next_status[sku] = {
+                "title": result["title"],
+                "available": available,
+                "quote": result["quote"],
+            }
             status = "AVAILABLE" if available else "unavailable"
             print(
                 f"[{index}/{len(devices)}] {result['title']} ({sku}) -> {status}; {result['quote']}"
@@ -164,6 +172,10 @@ def main():
 
     with CATALOG_PATH.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(next_catalog, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+    with STATUS_PATH.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(next_status, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
     if errors == len(devices):
